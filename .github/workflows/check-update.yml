@@ -1,0 +1,67 @@
+name: Check Phigros Update
+
+on:
+  # 每6小时检测一次更新 (UTC 0,6,12,18 = 北京时间 8,14,20,2)
+  schedule:
+    - cron: '0 0,6,12,18 * * *'
+  # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: '强制更新（忽略版本检查）'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Free up disk space
+        run: |
+          # GitHub Actions runner 磁盘空间有限，清理不需要的预装软件
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h /
+
+      - name: Force update override
+        if: ${{ github.event.inputs.force_update == 'true' }}
+        run: |
+          # 删除版本文件以强制重新解包
+          rm -f version.json
+          echo "强制更新模式：已删除版本记录"
+
+      - name: Run unpacker
+        env:
+          GITHUB_ACTIONS: 'true'
+        run: python scripts/unpack.py
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f version.json ]; then
+            VERSION=$(python -c "import json; print(json.load(open('version.json'))['version'])")
+            echo "## Phigros v${VERSION}" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -d charts ]; then
+            CHART_COUNT=$(find charts -name "Chart_*.json" | wc -l)
+            SONG_COUNT=$(ls charts/ | wc -l)
+            echo "- 歌曲数: ${SONG_COUNT}" >> $GITHUB_STEP_SUMMARY
+            echo "- 铺面数: ${CHART_COUNT}" >> $GITHUB_STEP_SUMMARY
+          fi
