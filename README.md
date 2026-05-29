@@ -1,16 +1,18 @@
 # Phigros Chart Tracker
 
 自动检测 Phigros 游戏更新，解包铺面（谱面）并上传到仓库。
+❤️ 本项目的诞生离不开 [@RainView-ovo](https://github.com/RainView-ovo) 提供的基础逻辑
 
 ## ⚠️ 免责声明 / Disclaimer
 
 **本仓库仅供学习和研究目的，所有铺面资源的版权归 Pigeon Games（鸽游）所有。**
 
 1. 本仓库中的铺面数据是通过技术手段从游戏安装包中提取的，**未获得 Pigeon Games 的授权**。
-2. 下载后请于 **24 小时内删除**。如果您喜欢 Phigros，请前往 [官方渠道](https://www.pigeon-games.cn/) 下载游戏并支持开发者。
+2. 下载后请于 **24 小时内删除**。如果您喜欢 Phigros，请前往 [官方渠道](https://www.taptap.cn/app/165287) 下载游戏并支持开发者。
 3. 本仓库的创建者不对任何人因使用本仓库内容而造成的任何直接或间接损失负责。
 4. 任何因使用本仓库内容而产生的版权纠纷，均与仓库创建者无关，由使用者自行承担全部责任。
 5. 如果 Pigeon Games 认为本仓库侵犯了其权益，请联系仓库创建者，将在收到通知后立即删除相关内容。
+6. 仅限用于本地打歌训练，造成的一切后果与开发者无关（包括法律责任）
 
 **By using this repository, you agree that:**
 - All chart resources are copyrighted by Pigeon Games.
