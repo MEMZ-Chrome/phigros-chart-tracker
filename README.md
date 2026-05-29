@@ -105,7 +105,6 @@ APK (zip)
 
 ### 下载可靠性
 
-- 使用好游快爆客户端 UA：`Androidkb/1.5.8.007(android;PJX110;16;1080x2256;WiFi)`
 - 支持断点续传（HTTP Range）
 - MD5 校验确保文件完整性
 - 最多 3 次重试
@@ -113,4 +112,3 @@ APK (zip)
 ## 致谢
 
 - Phigros 由 Pigeon Games（鸽游）开发
-- 好游快爆提供 APK 分发渠道
