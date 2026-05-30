@@ -22,10 +22,10 @@
 
 ## 工作原理
 
-1. **定时检测**：GitHub Actions 每 6 小时自动查询好游快爆 API 获取 Phigros 最新版本号
+1. **定时检测**：GitHub Actions 每天自动查询 API 获取 Phigros 最新版本号
 2. **版本比较**：与仓库中记录的版本对比，判断是否有新版本
-3. **最小化解压**：只解压 `catalog.json` 和铺面相关的 bundle，节省磁盘空间
-4. **增量解包**：只提取新增的铺面，不删除已有铺面
+3. **最小化解压**：只解压 `catalog.json` 和所需的 bundle，节省磁盘空间
+4. **增量解包**：只提取新增的资源（谱面、曲绘、音频），不删除已有内容
 5. **自动提交**：将新铺面推送到仓库
 
 ## 目录结构
@@ -41,12 +41,15 @@
 │   └── utils.py                        # 工具函数
 ├── scripts/
 │   └── unpack.py                       # 自动解包脚本
-├── charts/                             # 解包输出的铺面（自动生成）
+├── charts/                             # 解包输出的资源（自动生成）
 │   └── <songsId>/                      # 每首歌一个目录
 │       ├── Chart_EZ.json
 │       ├── Chart_HD.json
 │       ├── Chart_IN.json
-│       └── Chart_AT.json
+│       ├── Chart_AT.json
+│       ├── Illustration.jpg            # 曲绘
+│       ├── IllustrationLowRes.jpg      # 低分辨率曲绘
+│       └── music.wav / music.ogg       # 音频
 ├── version.json                        # 当前跟踪的版本信息
 ├── requirements.txt
 └── README.md
@@ -63,13 +66,14 @@
 
 ### 定时执行
 
-工作流每 6 小时自动检测一次更新（北京时间 8:00 / 14:00 / 20:00 / 2:00），也可手动触发。
+工作流每天自动检测一次更新（北京时间 8:00），也可手动触发。
 
 ### 增量更新
 
-- 只上传新增的铺面，不删除已有铺面
+- 只上传新增的资源，不删除已有内容
 - 通过扫描 `charts/` 目录已有的 `song_id/Chart_*.json` 与 catalog 对比来确定新增
 - 版本号相同时直接跳过，不重复下载
+- 默认提取谱面 + 曲绘 + 音频，可通过 `--no-media` 仅提取谱面
 
 ### 手动触发
 

@@ -2,13 +2,14 @@
 """Phigros 自动解包脚本 - 用于 GitHub Actions CI。
 
 流程：
-1. 从好游快爆 API 获取最新版本信息
+1. 从 API 获取最新版本信息
 2. 与本地记录的版本比较
-3. 若有更新：下载 APK → 解压 → 仅解包新增铺面 → 提交到仓库
+3. 若有更新：下载 APK → 解压 → 仅解包新增资源 → 提交到仓库
 
 增量策略：
-- 不删除已有铺面，只补充新增的
-- 通过比较 charts/ 目录已有的 song_id/Chart_*.json 与 catalog 中的铺面列表来确定新增
+- 不删除已有资源，只补充新增的
+- 通过比较 charts/ 目录已有的 song_id/Chart_*.json 与 catalog 中的资源列表来确定新增
+- 默认提取谱面 + 曲绘 + 音频，可通过 --no-media 仅提取谱面
 """
 
 from __future__ import annotations
@@ -25,11 +26,11 @@ from pathlib import Path
 
 import requests
 
-# 好游快爆 API
+# API 地址
 API_URL = "https://api.3839app.com/cdn/android/gameintro-home-1546-id-112696-packag--level-2.htm"
 
-# 好游快爆客户端 UA
-HYKB_UA = "Androidkb/1.5.8.007(android;PJX110;16;1080x2256;WiFi)"
+# 客户端 UA
+DEFAULT_UA = "Androidkb/1.5.8.007(android;PJX110;16;1080x2256;WiFi)"
 
 # 项目路径
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -41,14 +42,11 @@ WORK_DIR = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "phigros-unpack"
 
 
 def fetch_latest_info() -> dict:
-    """从好游快爆 API 获取 Phigros 最新版本信息。"""
-    print("正在查询好游快爆 API...")
-    resp = requests.get(API_URL, timeout=30)
+    """从 API 获取 Phigros 最新版本信息。"""
+    print("正在获取 API 最新版本信息...")
+    resp = requests.get(API_URL, headers={"User-Agent": DEFAULT_UA}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-
-    if data.get("code") != 100:
-        raise RuntimeError(f"API 返回错误: {data}")
 
     downinfo = data["result"]["data"]["downinfo"]
     return {
@@ -56,7 +54,7 @@ def fetch_latest_info() -> dict:
         "versioncode": downinfo["versioncode"],
         "apkurl": downinfo["apkurl"],
         "md5": downinfo["md5"],
-        "size_byte": downinfo["size_byte"],
+        "size_byte": int(downinfo["size_byte"]),
         "size_m": downinfo["size_m"],
     }
 
@@ -90,11 +88,11 @@ def scan_existing_charts(charts_dir: Path) -> set[str]:
 
 
 def download_apk(url: str, dest: Path, expected_md5: str | None = None, max_retries: int = 3) -> None:
-    """使用好游快爆 UA 下载 APK，支持断点续传和 MD5 校验。"""
+    """下载 APK，支持断点续传和 MD5 校验。"""
     print(f"正在下载 APK: {url}")
     print(f"目标路径: {dest}")
 
-    headers = {"User-Agent": HYKB_UA}
+    headers = {"User-Agent": DEFAULT_UA}
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -164,11 +162,12 @@ def download_apk(url: str, dest: Path, expected_md5: str | None = None, max_retr
                 raise
 
 
-def extract_apk_minimal(apk_path: Path, extract_dir: Path, needed_bundles: set[str] | None = None) -> Path:
-    """最小化解压 APK - 只解压铺面解包所需的文件。
+def extract_apk_minimal(apk_path: Path, extract_dir: Path, needed_bundles: set[str] | None = None, extract_media: bool = False) -> Path:
+    """最小化解压 APK - 只解压所需的 bundle 文件。
 
+    extract_media: 是否同时提取曲绘和音频 bundle。
     如果传入 needed_bundles，则只解压这些 bundle（增量模式）。
-    否则先解压 catalog.json，再根据 catalog 确定需要哪些铺面 bundle。
+    否则先解压 catalog.json，再根据 catalog 确定需要哪些 bundle。
     """
     apk_dir = extract_dir / "apk"
     if apk_dir.exists():
@@ -189,27 +188,33 @@ def extract_apk_minimal(apk_path: Path, extract_dir: Path, needed_bundles: set[s
         else:
             raise RuntimeError("APK 中未找到 assets/aa/catalog.json")
 
-    # 第二步：读取 catalog 确定铺面 bundle
+    # 第二步：读取 catalog 确定需要的 bundle
     sys.path.insert(0, str(REPO_ROOT))
     from phigros_unpacker.catalog import load_catalog
 
     track_entries, _ = load_catalog(apk_dir)
 
-    # 收集所有铺面相关 bundle
-    chart_bundles = set()
+    target_bundles = set()
     for entry in track_entries.values():
         file_name = entry["file_name"]
-        if file_name.startswith("Chart_") and file_name.endswith(".json"):
-            chart_bundles.add(entry["bundle"])
+        is_chart = file_name.startswith("Chart_") and file_name.endswith(".json")
+        is_image = file_name.lower().endswith((".jpg", ".jpeg", ".png", ".tga", ".webp"))
+        is_audio = file_name.lower().endswith((".wav", ".ogg", ".mp3", ".fsb"))
+
+        if is_chart:
+            target_bundles.add(entry["bundle"])
+        elif extract_media and (is_image or is_audio):
+            target_bundles.add(entry["bundle"])
 
     # 增量模式：只解压需要的 bundle
     if needed_bundles is not None:
-        chart_bundles = chart_bundles & needed_bundles
-        print(f"增量模式: 需要解压 {len(chart_bundles)} 个新 bundle")
+        target_bundles = target_bundles & needed_bundles
+        print(f"增量模式: 需要解压 {len(target_bundles)} 个新 bundle")
 
-    print(f"共 {len(chart_bundles)} 个铺面 bundle 待解压")
+    media_label = "（含曲绘/音频）" if extract_media else ""
+    print(f"共 {len(target_bundles)} 个 bundle 待解压{media_label}")
 
-    # 第三步：只解压铺面 bundle
+    # 第三步：解压 bundle
     android_dir = apk_dir / "assets" / "aa" / "Android"
     android_dir.mkdir(parents=True, exist_ok=True)
 
@@ -220,63 +225,67 @@ def extract_apk_minimal(apk_path: Path, extract_dir: Path, needed_bundles: set[s
             if not name.startswith("assets/aa/Android/"):
                 continue
             bundle_name = name[len("assets/aa/Android/"):]
-            if bundle_name in chart_bundles:
+            if bundle_name in target_bundles:
                 target = apk_dir / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with apk.open(name) as src, open(target, "wb") as dst:
                     dst.write(src.read())
                 extracted += 1
 
-    print(f"已解压 {extracted}/{len(chart_bundles)} 个铺面 bundle")
+    print(f"已解压 {extracted}/{len(target_bundles)} 个 bundle")
     return apk_dir
 
 
-def extract_charts_incremental(apk_dir: Path, output_dir: Path, existing_charts: set[str]) -> dict:
-    """仅解包新增铺面到输出目录。
+def extract_all_incremental(apk_dir: Path, output_dir: Path, existing_charts: set[str], extract_media: bool = False) -> dict:
+    """解包资源到输出目录。
 
+    extract_media: 是否同时提取曲绘和音频。
     existing_charts: 已存在的铺面集合，格式为 {song_id/Chart_EZ.json, ...}
     """
     sys.path.insert(0, str(REPO_ROOT))
     from phigros_unpacker import list_catalog_resources, extract_catalog_resource
 
-    print("正在扫描铺面资源...")
+    print("正在扫描资源...")
     catalog_resources = list_catalog_resources(apk_dir)
 
-    # 过滤出新增的铺面资源
-    new_chart_resources = []
+    new_resources = []
     for song in catalog_resources:
         for resource in song["resources"]:
-            if resource["kind"] == "chart":
+            kind = resource["kind"]
+            if kind == "chart":
                 key = f"{song['song_id']}/{resource['file_name']}"
                 if key not in existing_charts:
-                    new_chart_resources.append({**resource, "song_id": song["song_id"]})
+                    new_resources.append({**resource, "song_id": song["song_id"]})
+            elif extract_media and kind in ("image", "music"):
+                new_resources.append({**resource, "song_id": song["song_id"]})
 
-    total_charts = sum(
-        len([r for r in song["resources"] if r["kind"] == "chart"])
-        for song in catalog_resources
-    )
+    total = sum(len(song["resources"]) for song in catalog_resources)
+    chart_count = sum(1 for r in new_resources if r["kind"] == "chart")
+    image_count = sum(1 for r in new_resources if r["kind"] == "image")
+    music_count = sum(1 for r in new_resources if r["kind"] == "music")
 
-    print(f"铺面总数: {total_charts}, 已有: {len(existing_charts)}, 新增: {len(new_chart_resources)}")
+    print(f"资源总数: {total}, 待提取: 谱面 {chart_count}, 曲绘 {image_count}, 音频 {music_count}")
 
-    if not new_chart_resources:
-        print("没有新增铺面")
-        return {"extracted": 0, "failed": 0, "new_count": 0}
+    if not new_resources:
+        print("没有新增资源")
+        return {"extracted": 0, "failed": 0, "charts": 0, "images": 0, "music": 0}
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     success = 0
     failed = 0
-    for i, resource in enumerate(new_chart_resources, 1):
+    for i, resource in enumerate(new_resources, 1):
         try:
             result = extract_catalog_resource(apk_dir, resource, output_dir)
             success += 1
-            print(f"  [{i}/{len(new_chart_resources)}] 新增: {resource['song_id']}/{resource['file_name']}")
+            kind_label = {"chart": "谱面", "image": "曲绘", "music": "音频"}.get(resource["kind"], resource["kind"])
+            print(f"  [{i}/{len(new_resources)}] {kind_label}: {resource['song_id']}/{resource['file_name']}")
         except Exception as exc:
             failed += 1
-            print(f"  [{i}/{len(new_chart_resources)}] 失败: {resource['song_id']}/{resource['file_name']} - {exc}")
+            print(f"  [{i}/{len(new_resources)}] 失败: {resource['song_id']}/{resource['file_name']} - {exc}")
 
-    print(f"解包完成: 新增 {success}, 失败 {failed}")
-    return {"extracted": success, "failed": failed, "new_count": len(new_chart_resources)}
+    print(f"解包完成: 成功 {success}, 失败 {failed}")
+    return {"extracted": success, "failed": failed, "charts": chart_count, "images": image_count, "music": music_count}
 
 
 def git_commit_and_push(version_info: dict) -> bool:
@@ -308,8 +317,15 @@ def git_commit_and_push(version_info: dict) -> bool:
 
 def main():
     print("=" * 60)
-    print("Phigros 铺面自动更新工具")
+    print("Phigros 自动解包工具")
     print("=" * 60)
+
+    # 默认提取全部内容（谱面 + 曲绘 + 音频），可通过 --no-media 仅提取谱面
+    extract_media = "--no-media" not in sys.argv and os.environ.get("EXTRACT_MEDIA") != "0"
+    if extract_media:
+        print("模式: 谱面 + 曲绘 + 音频")
+    else:
+        print("模式: 仅谱面")
 
     # 1. 获取最新版本
     latest = fetch_latest_info()
@@ -339,11 +355,11 @@ def main():
 
     download_apk(latest["apkurl"], apk_path, expected_md5=latest.get("md5"))
 
-    # 5. 最小化解压 APK
-    apk_dir = extract_apk_minimal(apk_path, WORK_DIR)
+    # 5. 最小化解压 APK（提取全部内容）
+    apk_dir = extract_apk_minimal(apk_path, WORK_DIR, extract_media=extract_media)
 
-    # 6. 增量解包铺面（只添加新增的，不删除已有的）
-    result = extract_charts_incremental(apk_dir, CHARTS_DIR, existing_charts)
+    # 6. 增量解包（只添加新增的，不删除已有的）
+    result = extract_all_incremental(apk_dir, CHARTS_DIR, existing_charts, extract_media=extract_media)
 
     # 7. 保存版本信息
     save_local_version(latest)
@@ -361,9 +377,12 @@ def main():
         with open(os.environ["GITHUB_OUTPUT"], "a") as f:
             f.write(f"updated=true\n")
             f.write(f"version={latest['version']}\n")
-            f.write(f"charts_extracted={result['extracted']}\n")
+            f.write(f"charts_extracted={result.get('charts', 0)}\n")
+            f.write(f"images_extracted={result.get('images', 0)}\n")
+            f.write(f"music_extracted={result.get('music', 0)}\n")
 
-    print(f"\n更新完成! Phigros v{latest['version']} - 新增 {result['extracted']} 个铺面")
+    print(f"\n更新完成! Phigros v{latest['version']}")
+    print(f"  谱面: {result.get('charts', 0)}, 曲绘: {result.get('images', 0)}, 音频: {result.get('music', 0)}")
 
 
 if __name__ == "__main__":
