@@ -57,6 +57,8 @@ def group_catalog_resources(
     """按 songsId 聚合 catalog 中的 Track 资源。"""
     by_song: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in track_entries.values():
+        if entry["song_id"].startswith("#"):
+            continue
         if song_ids and entry["song_id"] not in song_ids:
             continue
         by_song[entry["song_id"]].append(entry)
