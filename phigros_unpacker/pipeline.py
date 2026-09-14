@@ -5,32 +5,18 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import load_catalog
-from .constants import CHART_LEVELS, IMAGE_FILES
+from .constants import CHART_LEVELS
 from .extractors import extract_asset
 from .utils import safe_name
 
 
 def resource_kind(file_name: str) -> dict[str, str]:
-    """根据 Track 文件名识别资源类型。"""
+    """根据 Track 文件名识别资源类型（只关心谱面，其余一律忽略）。"""
     lower_name = file_name.lower()
-    stem = file_name.rsplit(".", 1)[0]
-
-    if lower_name in {"music.wav", "music.ogg", "music.mp3", "music.fsb"}:
-        return {"kind": "music"}
-    if lower_name.startswith("music."):
-        return {"kind": "music"}
-
-    if file_name in IMAGE_FILES.values():
-        return {"kind": "image", "image": file_name}
-    if lower_name.endswith((".jpg", ".jpeg", ".png", ".tga", ".webp")):
-        return {"kind": "image", "image": file_name}
-    if "illustration" in lower_name or "cover" in lower_name:
-        return {"kind": "image", "image": file_name}
-
     if lower_name.startswith("chart_") and lower_name.endswith(".json"):
         return {
             "kind": "chart",
-            "chart": stem[len("Chart_"):],
+            "chart": file_name.rsplit(".", 1)[0][len("Chart_"):],
         }
     return {"kind": "other"}
 

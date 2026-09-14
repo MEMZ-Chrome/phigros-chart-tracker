@@ -61,11 +61,7 @@ jobs:
           fi
           if [ -d charts ]; then
             CHART_COUNT=$(find charts -name "Chart_*.json" | wc -l)
-            SONG_COUNT=$(ls charts/ | wc -l)
-            IMAGE_COUNT=$(find charts -name "*.jpg" -o -name "*.png" -o -name "*.jpeg" | wc -l)
-            AUDIO_COUNT=$(find charts -name "*.wav" -o -name "*.ogg" -o -name "*.mp3" | wc -l)
+            SONG_COUNT=$(find charts -mindepth 1 -maxdepth 1 -type d | wc -l)
             echo "- 歌曲数: ${SONG_COUNT}" >> $GITHUB_STEP_SUMMARY
             echo "- 铺面数: ${CHART_COUNT}" >> $GITHUB_STEP_SUMMARY
-            echo "- 曲绘数: ${IMAGE_COUNT}" >> $GITHUB_STEP_SUMMARY
-            echo "- 音频数: ${AUDIO_COUNT}" >> $GITHUB_STEP_SUMMARY
           fi
