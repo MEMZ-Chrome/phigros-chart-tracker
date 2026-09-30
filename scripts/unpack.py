@@ -225,6 +225,15 @@ def extract_apk_minimal(apk_path: Path, extract_dir: Path, needed_bundles: set[s
                 extracted += 1
 
     print(f"已解压 {extracted}/{len(chart_bundles)} 个谱面 bundle")
+
+    # 一个都没解出来说明 catalog 里的 bundle 名与 APK 内的实际文件名对不上
+    # （例如命名规则变化），此时必须显式失败，不能带着 0 个 bundle 继续往下走
+    if chart_bundles and extracted == 0:
+        raise RuntimeError(
+            f"catalog 声明的 {len(chart_bundles)} 个谱面 bundle 在 APK 中一个都没找到，"
+            "bundle 命名规则可能已变化，请检查 catalog 解析"
+        )
+
     return apk_dir
 
 
@@ -342,6 +351,13 @@ def main():
 
     # 6. 增量解包（只添加新增的，不删除已有的）
     result = extract_charts_incremental(apk_dir, CHARTS_DIR, existing_charts)
+
+    # 全部失败时不要把版本标记为已处理：否则下次运行会直接跳过，缺失的谱面永远补不回来
+    if result.get("new_count", 0) > 0 and result.get("extracted", 0) == 0:
+        raise RuntimeError(
+            f"{result['new_count']} 个新增谱面全部提取失败，已保留 "
+            f"v{local['version'] if local else '（无）'} 版本号，下次运行会重试"
+        )
 
     # 7. 保存版本信息
     save_local_version(latest)
