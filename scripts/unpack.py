@@ -87,79 +87,166 @@ def scan_existing_charts(charts_dir: Path) -> set[str]:
     return existing
 
 
-def download_apk(url: str, dest: Path, expected_md5: str | None = None, max_retries: int = 3) -> None:
-    """下载 APK，支持断点续传和 MD5 校验。"""
+def _download_progress(downloaded: int, total: int) -> None:
+    """打印单行下载进度。"""
+    if not total:
+        return
+    pct = downloaded / total * 100
+    mb = downloaded / (1024 * 1024)
+    total_mb = total / (1024 * 1024)
+    print(f"\r下载进度: {mb:.1f}/{total_mb:.1f} MB ({pct:.1f}%)", end="", flush=True)
+
+
+def download_apk(
+    url: str,
+    dest: Path,
+    expected_md5: str | None = None,
+    expected_size: int | None = None,
+    max_retries: int = 10,
+    stale_timeout: int = 120,
+    max_network_errors: int = 5,
+) -> None:
+    """下载 APK，支持断点续传和 MD5 校验。
+
+    网络中断、传输超时、长度不符都不会直接失败：已经落盘的数据会保留在 dest，
+    下一轮用 Range 请求从断点继续。只有以下情况才放弃：
+    - 连续 max_retries 轮没有任何进展
+    - MD5 连续 max_retries 次校验失败（说明源文件已损坏或已变更）
+    """
     print(f"正在下载 APK: {url}")
     print(f"目标路径: {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
 
-    headers = {"User-Agent": DEFAULT_UA}
-
-    for attempt in range(1, max_retries + 1):
+    def known_total() -> int:
+        """优先用 API 给出的文件大小，拿不到时用 Range 探测。"""
+        if expected_size:
+            return expected_size
         try:
-            existing_size = dest.stat().st_size if dest.exists() else 0
-            req_headers = dict(headers)
-            if existing_size > 0:
-                req_headers["Range"] = f"bytes={existing_size}-"
-                print(f"断点续传: 从 {existing_size} bytes 继续")
-
-            resp = requests.get(url, headers=req_headers, stream=True, timeout=300)
+            resp = requests.head(url, headers={"User-Agent": DEFAULT_UA}, timeout=30, allow_redirects=True)
             resp.raise_for_status()
+            return int(resp.headers.get("content-length", 0) or 0)
+        except requests.RequestException:
+            return 0
 
-            total = int(resp.headers.get("content-length", 0))
-            resume = existing_size > 0 and resp.status_code == 206
-            if resume:
-                total += existing_size
-            elif resp.status_code == 200:
+    total = known_total()
+    print(f"文件总大小: {total} bytes")
+
+    stalls = 0
+    network_errors = 0
+    md5_failures = 0
+    # 每轮最多尝试的续传次数 + 没有进度的次数统计
+    while stalls < max_retries and network_errors < max_network_errors:
+        existing_size = dest.stat().st_size if dest.exists() else 0
+
+        if total:
+            if existing_size == total:
+                pass  # 已经下载完整，直接进入校验
+            elif existing_size > total:
+                print(f"本地文件比预期大 ({existing_size} > {total})，删除后重新下载")
+                dest.unlink(missing_ok=True)
                 existing_size = 0
 
-            downloaded = existing_size
-            md5 = hashlib.md5()
+        if total and existing_size == total:
+            print(f"文件已完整下载 ({existing_size} bytes)，开始校验")
+        else:
+            if total and existing_size > 0:
+                print(f"断点续传: 从 {existing_size} bytes 继续 ({existing_size / total * 100:.1f}%)")
 
-            mode = "r+b" if resume else "wb"
-            if mode == "wb":
-                dest.parent.mkdir(parents=True, exist_ok=True)
+            req_headers = {"User-Agent": DEFAULT_UA}
+            if existing_size > 0:
+                req_headers["Range"] = f"bytes={existing_size}-"
 
-            with open(dest, mode) as f:
-                if resume:
-                    f.seek(0)
-                    while chunk := f.read(1024 * 1024):
-                        md5.update(chunk)
-                    f.seek(0, 2)
+            try:
+                with requests.get(
+                    url, headers=req_headers, stream=True, timeout=(30, stale_timeout)
+                ) as resp:
+                    resp.raise_for_status()
 
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    md5.update(chunk)
+                    if resp.status_code == 206:
+                        content_range = resp.headers.get("content-range", "")
+                        # Content-Range: bytes 0-123/456
+                        if "/" in content_range:
+                            total = int(content_range.rsplit("/", 1)[1]) or total
+                        mode = "ab"
+                    else:
+                        # 服务端忽略了 Range，只能从头来
+                        if existing_size > 0:
+                            print("服务端不支持断点续传，重新下载")
+                        existing_size = 0
+                        length = int(resp.headers.get("content-length", 0) or 0)
+                        if length:
+                            total = length
+                        mode = "wb"
+
+                    written = existing_size
+                    with open(dest, mode) as f:
+                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            written += len(chunk)
+                            _download_progress(written, total)
+
+                    print()
+                    if total and written < total:
+                        raise ConnectionError(f"连接提前关闭: 已下载 {written}/{total} bytes")
+
+            except (
+                requests.RequestException,
+                ConnectionError,
+                TimeoutError,
+                OSError,
+            ) as exc:
+                current = dest.stat().st_size if dest.exists() else 0
+                if current > existing_size:
+                    # 有进展：保留已下载的数据，立刻续传
+                    print(f"\n下载中断 (已保留 {current} bytes): {exc}")
                     if total:
-                        pct = downloaded / total * 100
-                        mb = downloaded / (1024 * 1024)
-                        total_mb = total / (1024 * 1024)
-                        print(f"\r下载进度: {mb:.1f}/{total_mb:.1f} MB ({pct:.1f}%)", end="", flush=True)
-
-            print(f"\n下载完成: {dest} ({downloaded} bytes)")
-
-            if expected_md5:
-                actual_md5 = md5.hexdigest()
-                if actual_md5 == expected_md5:
-                    print(f"MD5 校验通过: {actual_md5}")
+                        print(f"已保存 {current / total * 100:.1f}%，继续续传...")
+                    network_errors = 0
+                    stalls = 0
+                    time.sleep(2)
                 else:
-                    print(f"MD5 校验失败! 期望: {expected_md5}, 实际: {actual_md5}")
-                    dest.unlink(missing_ok=True)
-                    if attempt < max_retries:
-                        print(f"第 {attempt}/{max_retries} 次尝试失败，5秒后重试...")
-                        time.sleep(5)
-                        continue
-                    raise RuntimeError(f"MD5 校验失败: 期望 {expected_md5}, 实际 {actual_md5}")
+                    # 没有进展：可能是连接一直连不上，退避重试
+                    stalls += 1
+                    network_errors += 1
+                    wait = min(60, 5 * network_errors)
+                    print(f"\n下载出错 (无进度 {stalls}/{max_retries}, {wait}秒后重试): {exc}")
+                    time.sleep(wait)
+                continue
 
-            return
+        # 走到这里说明文件长度已达标，做 MD5 校验
+        if expected_md5:
+            actual_md5 = compute_md5(dest)
+            if actual_md5 == expected_md5:
+                print(f"MD5 校验通过: {actual_md5}")
+                return
+            md5_failures += 1
+            print(f"MD5 校验失败 ({md5_failures}/{max_retries})! 期望: {expected_md5}, 实际: {actual_md5}")
+            dest.unlink(missing_ok=True)
+            if md5_failures >= max_retries:
+                raise RuntimeError(f"MD5 校验失败: 期望 {expected_md5}, 实际 {actual_md5}")
+            print("删除文件后重新下载...")
+            time.sleep(5)
+            stalls += 1
+            continue
 
-        except (requests.RequestException, RuntimeError) as exc:
-            if attempt < max_retries:
-                print(f"\n下载出错 (第 {attempt}/{max_retries} 次): {exc}")
-                print("5秒后重试...")
-                time.sleep(5)
-            else:
-                raise
+        print(f"\n下载完成: {dest}")
+        return
+
+    actual_size = dest.stat().st_size if dest.exists() else 0
+    raise RuntimeError(
+        f"下载失败: {url}（已下载 {actual_size}/{total or '?'} bytes）"
+    )
+
+
+def compute_md5(path: Path) -> str:
+    """分块计算文件 MD5，避免把 2GB+ 的文件整个读进内存。"""
+    md5 = hashlib.md5()
+    with open(path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            md5.update(chunk)
+    return md5.hexdigest()
 
 
 def extract_apk_minimal(apk_path: Path, extract_dir: Path, needed_bundles: set[str] | None = None) -> Path:
@@ -286,6 +373,15 @@ def extract_charts_incremental(apk_dir: Path, output_dir: Path, existing_charts:
     return {"extracted": success, "failed": failed, "new_count": len(new_chart_resources)}
 
 
+def _target_branch() -> str:
+    """确定推送目标分支：优先用触发本次运行的分支，否则回退到 main。"""
+    return (
+        os.environ.get("GITHUB_REF_NAME")
+        or os.environ.get("GITHUB_HEAD_REF")
+        or "main"
+    )
+
+
 def git_commit_and_push(version_info: dict) -> bool:
     """提交铺面更新到仓库。"""
     print("正在提交更新到仓库...")
@@ -308,7 +404,11 @@ def git_commit_and_push(version_info: dict) -> bool:
         ["git", "commit", "-m", f"feat: 更新 Phigros 铺面至 v{version}"],
         check=True,
     )
-    subprocess.run(["git", "push"], check=True)
+    # Actions 里的 checkout 可能处于 detached HEAD，显式指定远端和分支
+    subprocess.run(
+        ["git", "push", "origin", f"HEAD:{_target_branch()}"],
+        check=True,
+    )
     print(f"已提交并推送 Phigros v{version} 铺面更新")
     return True
 
@@ -344,7 +444,12 @@ def main():
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     apk_path = WORK_DIR / "phigros.apk"
 
-    download_apk(latest["apkurl"], apk_path, expected_md5=latest.get("md5"))
+    download_apk(
+        latest["apkurl"],
+        apk_path,
+        expected_md5=latest.get("md5"),
+        expected_size=latest.get("size_byte"),
+    )
 
     # 5. 最小化解压 APK（只取谱面 bundle）
     apk_dir = extract_apk_minimal(apk_path, WORK_DIR)
